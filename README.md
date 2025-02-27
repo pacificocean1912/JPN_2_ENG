@@ -3,7 +3,7 @@
 This repository contains a Neural Machine Translation (NMT) model implemented using TensorFlow and Keras. The model is designed to translate sentences from Japanese to English. It utilizes a sequence-to-sequence (Seq2Seq) architecture with Long Short-Term Memory (LSTM) networks and pre-trained GloVe word embeddings.
 
 ## current ideas 
-*currently testing out if using polars would lower the memory usage of this project*
+*currently switching one hot into burt and seeing if that lowers the computational power of this project*
 **Research Question:**
 
 *How can a sequence-to-sequence (Seq2Seq) model with LSTM networks and pre-trained GloVe embeddings be optimized for accurate and efficient Japanese-to-English translation, and what are the key factors influencing its performance on large-scale datasets?*
