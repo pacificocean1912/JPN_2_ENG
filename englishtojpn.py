@@ -8,7 +8,8 @@ os.environ["KMP_DUPLICATE_LIB_OK"] = "TRUE"
 
 # Import necessary libraries
 try:
-    from icecream import ic  # For debugging and logging
+    from icecream import ic  # For debugging and logging 
+    #sadly the hpc doens't have icecream installed so I can't use it so I replaced it with print
 except Exception as e:
     print("icecream not found",e)
 try:    
@@ -17,7 +18,6 @@ try:
     import torch.optim as optim
 except Exception as e:
     print("can't find pytorch",e)
-
 try:
     import numpy as np
 except Exception as e:
@@ -46,6 +46,11 @@ try:
     import datasets
 except Exception as e:
     print("datasets needs to be installed ",e)
+import torch
+if torch.cuda.is_available():
+    print(f"GPU: {torch.cuda.get_device_name(0)} is available.")
+else:
+    print("No GPU available. Training will run on CPU.")
 
 print("starting the program")
 # Set the device to GPU if available, otherwise CPU
@@ -55,17 +60,16 @@ device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 BATCH_SIZE = 64  # Number of samples per batch
 EPOCHS = 20  # Number of training epochs
 LSTM_NODES = 256  # Number of LSTM units
-NUM_SENTENCES = 2000  # Maximum number of sentences to use
-MAX_SENTENCE_LENGTH = 200  # Maximum length of a sentence
+NUM_SENTENCES = 7000  # Maximum number of sentences to use
+MAX_SENTENCE_LENGTH = 2000  # Maximum length of a sentence
 MAX_NUM_WORDS = 200000  # Maximum number of words in the vocabulary
 EMBEDDING_SIZE = 768  # Size of BERT embeddings
 SIZE_OF_BLOCK = 10000  # Size of data chunks for training
-EPOCHS = 100
+EPOCHS = 200
 
 # Load BERT tokenizer and model
 bert_tokenizer = BertTokenizer.from_pretrained('bert-base-uncased')
 bert_model = BertModel.from_pretrained('bert-base-uncased').to(device)
-
 # Load the dataset from disk
 def load_dataset() -> tuple:
     """
@@ -79,7 +83,9 @@ def load_dataset() -> tuple:
         train_data = datasets.load_from_disk("dataset_jpn_eng.hf/train")
         test_data = datasets.load_from_disk("dataset_jpn_eng.hf/test")
         valid_data = datasets.load_from_disk("dataset_jpn_eng.hf/valid")
-
+        train_data = train_data.shuffle(seed=43).select(range(NUM_SENTENCES))
+        print("train_data.shape:", train_data.shape)
+        print(train_data)
         # Return the datasets
         return train_data, test_data, valid_data
     except Exception as e:
@@ -90,14 +96,15 @@ train_data, test_data, valid_data = load_dataset()
 def bert_tokenize(sentences):
     return bert_tokenizer(sentences, padding=True, truncation=True, return_tensors="pt")
 
-print("tokenizing")
+print("starting tokenizing")
 input_encodings = bert_tokenize(train_data['eng'])
+print("input_encodings")
 input_ids = input_encodings['input_ids'].to(device)
+#print("input_ids.shape:", input_ids.shape)
 attention_mask = input_encodings['attention_mask'].to(device)
-print("input_ids.shape:", input_ids.shape)
-print("attention_mask.shape:", attention_mask.shape)
+#print("attention_mask.shape:", attention_mask.shape)
 MAX_SENTENCE_LENGTH = input_ids.shape[1]
-print("input_ids[0]:", input_ids[0])
+#print("input_ids[0]:", input_ids[1])
 
 # Get BERT embeddings for the input sentences
 with torch.no_grad():
@@ -179,8 +186,36 @@ class Seq2SeqModel(nn.Module):
         decoder_outputs, _ = self.decoder_lstm(decoder_inputs_x, (h, c))
         decoder_outputs = self.decoder_dense(decoder_outputs)
         return decoder_outputs
+try:
+    saved_state_dict = torch.load('smaller.pth')
+except FileNotFoundError:
+    print("No saved model found.")
 
 model = Seq2SeqModel(EMBEDDING_SIZE, LSTM_NODES, num_words_output, max_out_len).to(device)
+old_num_words = saved_state_dict['decoder_embedding.weight'].shape[0]
+new_num_words = num_words_output
+
+
+# Resize the embedding layer
+embedding_weight = saved_state_dict['decoder_embedding.weight']
+new_embedding_weight = torch.zeros((new_num_words, LSTM_NODES)).to(device)
+new_embedding_weight[:old_num_words] = embedding_weight  # Copy old weights
+saved_state_dict['decoder_embedding.weight'] = new_embedding_weight
+
+# Resize the dense layer
+dense_weight = saved_state_dict['decoder_dense.weight']
+new_dense_weight = torch.zeros((new_num_words, LSTM_NODES)).to(device)
+new_dense_weight[:old_num_words] = dense_weight  # Copy old weights
+saved_state_dict['decoder_dense.weight'] = new_dense_weight
+
+dense_bias = saved_state_dict['decoder_dense.bias']
+new_dense_bias = torch.zeros(new_num_words).to(device)
+new_dense_bias[:old_num_words] = dense_bias  # Copy old weights
+saved_state_dict['decoder_dense.bias'] = new_dense_bias
+
+# Load the resized weights into the model
+model.load_state_dict(saved_state_dict)
+model.eval()
 
 # Compile the model with Adam optimizer and CrossEntropyLoss
 optimizer = optim.Adam(model.parameters())
@@ -213,33 +248,56 @@ decoder_input_sequences_gpu = decoder_input_sequences.to(device)
 
 #-------------------- running the project -----------------------------------------------------------------------------------
 
+#try:
+#model.load_state_dict(torch.load('smaller.pth'))
+#except Exception as e:
+#    print("model failed to load",e)
 def loopthrough_model():
-    train_seg = train_data
-    print(f"train length: {len(train_seg['eng'])}")
-    decoder_targets_one_hot = torch.zeros((len(train_seg['eng']), max_out_len, len(output_tokenizer.word2idx)), dtype=torch.float).to(device)
-    print(f"decoder_targets_one_hot shape: {decoder_targets_one_hot.shape}")
+    print(f"train length: {len(train_data['eng'])}")
 
-    decoder_onehot = onehot_loop(decoder_output_sequences, decoder_targets_one_hot)
-    print(f"decoder_onehot shape: {decoder_onehot.shape}")
-    if decoder_onehot is None:
-        print("decoder_onehot is None, skipping")
+    # Convert decoder_output_sequences to a PyTorch tensor
+    decoder_output_sequences_tensor = torch.tensor(decoder_output_sequences, dtype=torch.long).to(device)
+    print(f"decoder_output_sequences_tensor shape: {decoder_output_sequences_tensor.shape}")
 
-    print(len(decoder_input_sequences_gpu), 'decoder_input_sequences shape')
-    print(len(decoder_onehot), 'decoder_onehot shape')
     # Train the model on the segment
     for epoch in range(EPOCHS):
         model.train()
         optimizer.zero_grad()
+
+        # Forward pass
         outputs = model(encoder_input_sequences_gpu, decoder_input_sequences_gpu)
-        loss = criterion(outputs.view(-1, num_words_output), decoder_onehot.view(-1, num_words_output))
+        #print(f"outputs shape: {outputs.shape}")
+
+        # Reshape outputs and targets for CrossEntropyLoss
+        outputs_reshaped = outputs.view(-1, num_words_output)  # Shape: (batch_size * sequence_length, num_words_output)
+        targets_reshaped = decoder_output_sequences_tensor.view(-1)  # Shape: (batch_size * sequence_length)
+
+        #print(f"outputs_reshaped shape: {outputs_reshaped.shape}")
+        #print(f"targets_reshaped shape: {targets_reshaped.shape}")
+
+        # Compute loss
+                # Compute loss
+        loss = criterion(outputs_reshaped, targets_reshaped)
+
+        # Calculate accuracy
+        _, predicted_indices = torch.max(outputs_reshaped, 1)  # Get predicted token indices
+        correct_predictions = (predicted_indices == targets_reshaped).sum().item()
+        total_predictions = targets_reshaped.size(0)
+        accuracy = correct_predictions / total_predictions
+
+        print(f"Epoch {epoch+1}/{EPOCHS}, Accuracy: {accuracy * 100:.2f}% ,Loss: {loss.item()}" )
+
+
+        # Backward pass and optimization
         loss.backward()
         optimizer.step()
-        print(f"Epoch {epoch+1}/{EPOCHS}, Loss: {loss.item()}")
 
+        # Early stopping check
         if es(loss.item()):
             print("Early stopping")
             break
 
+    # Save the model
     torch.save(model.state_dict(), 'smaller.pth')
 
 def onehot_loop(decoder_output_sequences, decoder_targets_one_hot):
